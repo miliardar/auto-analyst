@@ -1,4 +1,5 @@
 import os
+import time
 import streamlit as st
 from google import genai
 from google.genai import types
@@ -9,7 +10,14 @@ load_dotenv(override=True)
 class AIEngine:
     def __init__(self):
         # Try Streamlit secrets first (cloud), then fall back to .env (local)
-        self.api_key = st.secrets.get("GOOGLE_API_KEY", None) or os.getenv("GOOGLE_API_KEY")
+        try:
+            self.api_key = st.secrets.get("GOOGLE_API_KEY", None)
+        except Exception:
+            self.api_key = None
+        
+        if not self.api_key:
+            self.api_key = os.getenv("GOOGLE_API_KEY")
+        
         if not self.api_key:
             raise ValueError("GOOGLE_API_KEY not found in secrets or .env file")
         
@@ -17,9 +25,10 @@ class AIEngine:
         # Using gemini-2.0-flash which is available and supports grounding
         self.model_name = "gemini-2.0-flash"
 
-    def analyze_ticker(self, ticker_symbol):
+    def analyze_ticker(self, ticker_symbol, max_retries=3):
         """
         Generates a financial analysis report using Gemini with Google Search Grounding.
+        Includes retry logic with exponential backoff.
         """
         
         prompt = f"""
@@ -87,27 +96,47 @@ class AIEngine:
         Na záver pridaj disclaimer: "Táto analýza nie je finančná rada. Investovanie nesie riziko straty."
         """
 
-        try:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    tools=[types.Tool(
-                        google_search=types.GoogleSearch()
-                    )],
-                    response_mime_type="text/plain"
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        tools=[types.Tool(
+                            google_search=types.GoogleSearch()
+                        )],
+                        response_mime_type="text/plain"
+                    )
                 )
-            )
-            
-            if not response or not response.text:
-                return "Chyba: AI nevrátila žiadny text. Skúste to prosím znova."
                 
-            return response.text
-        except Exception as e:
-            # Check for common errors
-            err_msg = str(e)
-            if "404" in err_msg:
-                return f"Chyba: Model {self.model_name} nebol nájdený alebo nie je podporovaný."
-            if "429" in err_msg:
-                return "Chyba: Prekročený limit požiadaviek (Rate limit). Počkajte chvíľu."
-            return f"Chyba pri generovaní analýzy: {err_msg}"
+                if not response or not response.text:
+                    return "Chyba: AI nevrátila žiadny text. Skúste to prosím znova."
+                    
+                return response.text
+                
+            except Exception as e:
+                last_error = str(e)
+                
+                # Check if it's a rate limit error (429)
+                if "429" in last_error or "rate" in last_error.lower() or "quota" in last_error.lower():
+                    if attempt < max_retries - 1:
+                        # Wait with exponential backoff: 10s, 20s, 40s
+                        wait_time = 10 * (2 ** attempt)
+                        time.sleep(wait_time)
+                        continue
+                
+                # For other errors, don't retry
+                break
+        
+        # Return detailed error for debugging
+        if "404" in last_error:
+            return f"Chyba: Model {self.model_name} nebol nájdený alebo nie je podporovaný."
+        if "429" in last_error or "rate" in last_error.lower() or "quota" in last_error.lower():
+            return f"Chyba: Prekročený limit požiadaviek (Rate limit) aj po {max_retries} pokusoch. Skúste neskôr."
+        if "403" in last_error or "permission" in last_error.lower():
+            return f"Chyba: Prístup zamietnutý. Skontrolujte API kľúč. Detail: {last_error}"
+        
+        return f"Chyba pri generovaní analýzy: {last_error}"
+
