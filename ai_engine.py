@@ -100,13 +100,11 @@ class AIEngine:
         
         for attempt in range(max_retries):
             try:
+                # Temporarily disabled Google Search grounding to test basic API
                 response = self.client.models.generate_content(
                     model=self.model_name,
                     contents=prompt,
                     config=types.GenerateContentConfig(
-                        tools=[types.Tool(
-                            google_search=types.GoogleSearch()
-                        )],
                         response_mime_type="text/plain"
                     )
                 )
